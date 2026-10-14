@@ -1,0 +1,47 @@
+<Window x:Class="AltTabWheel.Views.WheelWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="AltTabWheel"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ShowInTaskbar="False"
+        Topmost="True"
+        ResizeMode="NoResize"
+        WindowStartupLocation="Manual"
+        SizeToContent="Manual"
+        Focusable="False"
+        IsHitTestVisible="False"
+        Width="800" Height="600">
+    <Grid x:Name="RootGrid">
+        <Grid.Background>
+            <SolidColorBrush Color="#000000" Opacity="0.62"/>
+        </Grid.Background>
+
+        <Canvas x:Name="WheelCanvas"
+                Width="920" Height="920"
+                HorizontalAlignment="Center" VerticalAlignment="Center"/>
+
+        <Border x:Name="CenterBadge"
+                Width="186" Height="186"
+                CornerRadius="93"
+                Background="#F21D1D1F"
+                BorderBrush="#3DFFFFFF" BorderThickness="1.5"
+                HorizontalAlignment="Center" VerticalAlignment="Center">
+            <Border.Effect>
+                <DropShadowEffect BlurRadius="24" ShadowDepth="0" Opacity="0.35" Color="#000000"/>
+            </Border.Effect>
+            <StackPanel VerticalAlignment="Center" Margin="20,0">
+                <TextBlock x:Name="CenterProcess"
+                           Foreground="#FFFFFF" FontSize="15" FontWeight="SemiBold"
+                           TextAlignment="Center" TextTrimming="CharacterEllipsis"
+                           HorizontalAlignment="Center" MaxWidth="146"/>
+                <TextBlock x:Name="CenterTitle"
+                           Foreground="#A6FFFFFF" FontSize="11.5"
+                           TextAlignment="Center" TextTrimming="CharacterEllipsis"
+                           TextWrapping="Wrap" MaxHeight="34"
+                           Margin="0,4,0,0"/>
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>
