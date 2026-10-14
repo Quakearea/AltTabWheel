@@ -1,0 +1,16 @@
+# Build output
+bin/
+obj/
+out/
+
+# IDE
+.vs/
+.vscode/
+*.user
+
+# OS
+Thumbs.db
+Desktop.ini
+
+# Debug artifacts
+*.log
