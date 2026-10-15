@@ -10,7 +10,7 @@ namespace AltTabWheel;
 /// throughout (source-generated marshalling rejects StringBuilder and the
 /// assembly is not marked DisableRuntimeMarshalling).
 /// </summary>
-internal static class NativeMethods
+public static class NativeMethods
 {
     // ---- Hooks ----
     public const int WH_KEYBOARD_LL = 13;
@@ -21,6 +21,7 @@ internal static class NativeMethods
     public const int WM_SYSKEYDOWN = 0x0104;
     public const int WM_SYSKEYUP = 0x0105;
     public const int WM_MOUSEWHEEL = 0x020A;
+    public const int WM_MOUSEMOVE = 0x0200;
 
     public const uint VK_MENU = 0x12;
     public const uint VK_LMENU = 0xA4;
@@ -32,6 +33,10 @@ internal static class NativeMethods
     public const uint VK_UP = 0x26;
     public const uint VK_RIGHT = 0x27;
     public const uint VK_DOWN = 0x28;
+    public const uint VK_1 = 0x31;
+    public const uint VK_9 = 0x39;
+    public const uint VK_LWIN = 0x5B;
+    public const uint VK_RWIN = 0x5C;
 
     public delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
     public delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
@@ -115,6 +120,76 @@ internal static class NativeMethods
 
     public const int DWMWA_CLOAKED = 14;
 
+    // ---- DWM 实时缩略图（中心窗口预览） ----
+    public const uint DWM_TNP_RECTDESTINATION = 0x00000001;
+    public const uint DWM_TNP_VISIBLE = 0x00000008;
+    public const uint DWM_TNP_SOURCECLIENTAREAONLY = 0x00000010;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DWM_THUMBNAIL_PROPERTIES
+    {
+        public uint dwFlags;
+        public RECT rcDestination;
+        public RECT rcSource;
+        public byte opacity;
+        [MarshalAs(UnmanagedType.Bool)]
+        public bool fVisible;
+        [MarshalAs(UnmanagedType.Bool)]
+        public bool fSourceClientAreaOnly;
+    }
+
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmRegisterThumbnail(IntPtr hwndDestination, IntPtr hwndSource, out IntPtr phThumbnailId);
+
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmUnregisterThumbnail(IntPtr hThumbnailId);
+
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmUpdateThumbnailProperties(IntPtr hThumbnailId, ref DWM_THUMBNAIL_PROPERTIES ptnProperties);
+
+    // ---- 窗口快照（PrintWindow）：AllowsTransparency 窗口不支持 DWM 缩略图，改用抓图 ----
+    public const uint PW_CLIENTONLY = 1;
+    public const uint PW_RENDERFULLCONTENT = 2;
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, uint nFlags);
+
+    [DllImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool DeleteObject(IntPtr hObject);
+
+    // ---- 高清图标光栅化 ----
+    public const uint DI_NORMAL = 0x0003;
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool DrawIconEx(IntPtr hdc, int xLeft, int yTop, IntPtr hIcon,
+        int cxWidth, int cyHeight, int istepIfAniCur, IntPtr hbrFlickerFreeDraw, uint diFlags);
+
+    public const uint SIIGBF_BIGGERSIZEOK = 0x0001;
+    public const uint SIIGBF_RESIZETOSTRETCH = 0x0002;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SIZE
+    {
+        public int cx;
+        public int cy;
+    }
+
+    /// <summary>IShellItemImageFactory：Shell 图标渲染（exe 内最大图标源）。</summary>
+    [ComImport, Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b"),
+     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IShellItemImageFactory
+    {
+        [PreserveSig]
+        int GetImage(SIZE size, uint flags, out IntPtr phbm);
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    public static extern int SHCreateItemFromParsingName(
+        string pszPath, IntPtr pbc, [In] ref Guid riid, [MarshalAs(UnmanagedType.Interface)] out object ppv);
+
     [DllImport("dwmapi.dll")]
     public static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out int pvAttribute, int cbAttribute);
 
@@ -135,6 +210,48 @@ internal static class NativeMethods
     [DllImport("shell32.dll")]
     public static extern int ExtractIconExW([MarshalAs(UnmanagedType.LPWStr)] string lpszFile, int nIconIndex,
         out IntPtr phiconLarge, out IntPtr phiconSmall, int nIcons);
+
+    public const int GCLP_HICON = -14;
+
+    [DllImport("user32.dll", EntryPoint = "GetClassLongPtrW")]
+    private static extern IntPtr GetClassLongPtr64(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", EntryPoint = "GetClassLongW")]
+    private static extern int GetClassLong32(IntPtr hWnd, int nIndex);
+
+    /// <summary>窗口类默认图标（GCLP_HICON），常用于未自定义图标的窗口。</summary>
+    public static IntPtr GetClassIcon(IntPtr hWnd)
+    {
+        try
+        {
+            return IntPtr.Size == 8
+                ? GetClassLongPtr64(hWnd, GCLP_HICON)
+                : new IntPtr(GetClassLong32(hWnd, GCLP_HICON));
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
+    }
+
+    public const uint SHGFI_ICON = 0x100;
+    public const uint SHGFI_LARGEICON = 0x0;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct SHFILEINFO
+    {
+        public IntPtr hIcon;
+        public int iIcon;
+        public uint dwAttributes;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string szDisplayName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 80)]
+        public string szTypeName;
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    public static extern IntPtr SHGetFileInfoW(string pszPath, uint dwFileAttributes,
+        ref SHFILEINFO psfi, uint cbFileInfo, uint uFlags);
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -186,6 +303,17 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool GetMonitorInfoW(IntPtr hMonitor, ref MONITORINFO lpmi);
+
+    [DllImport("SHCore.dll")]
+    public static extern int GetDpiForMonitor(IntPtr hMonitor, int dpiType, out uint dpiX, out uint dpiY);
+
+    public const int MDT_EFFECTIVE_DPI = 0;
+
+    [DllImport("user32.dll")]
+    public static extern uint GetDpiForWindow(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
 
     [StructLayout(LayoutKind.Sequential)]
     public struct POINT

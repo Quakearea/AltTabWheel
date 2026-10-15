@@ -18,13 +18,26 @@ public partial class App : Application
     private readonly WindowService _windowService = new();
     private readonly GlobalInputHook _hook = new();
     private readonly WheelWindow _wheel = new();
+    private readonly AppSettings _settings;
     private Forms.NotifyIcon? _trayIcon;
 
     private IReadOnlyList<AppWindow> _windows = Array.Empty<AppWindow>();
+    private List<WheelItem> _items = new();
+
+    public App()
+    {
+        _settings = AppSettings.Load();
+    }
 
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+
+        DispatcherUnhandledException += (_, args) =>
+        {
+            Log.Write($"UNHANDLED: {args.Exception}");
+            args.Handled = true;
+        };
 
         SetupTrayIcon();
         Log.Write("OnStartup");
@@ -34,7 +47,13 @@ public partial class App : Application
         _hook.AltReleased += OnAltReleased;
         _hook.EscapePressed += OnEscapePressed;
         _hook.WheelScrolled += OnWheelScrolled;
+        _hook.MouseMoved += (s, pt) => Dispatcher.BeginInvoke(() => _wheel.HandleMouseMove(pt.X, pt.Y));
         _wheel.IsVisibleChanged += (_, _) => _hook.IsWheelOpen = _wheel.IsOpen;
+        ApplySettingsToWheel();
+
+        // --settings：直接打开设置窗口（便于托盘之外的方式进入）
+        if (e.Args.Contains("--settings", StringComparer.OrdinalIgnoreCase))
+            ShowSettings();
 
         bool hookOk = _hook.Install();
         Log.Write($"hook install: {hookOk}");
@@ -58,8 +77,11 @@ public partial class App : Application
             {
                 timer.Stop();
                 _windows = _windowService.GetWindows();
-                Log.Write($"selftest: {_windows.Count} windows");
-                _wheel.Open(_windows, _windows.Count > 1 ? 1 : 0);
+                _items = _windowService.BuildItems(_windows, _settings);
+                Log.Write($"selftest: {_windows.Count} windows -> {_items.Count} items");
+                _hook.IsWheelOpen = true;
+                ApplySettingsToWheel();
+                _wheel.Open(_items, _items.Count > 1 ? 1 : 0);
             };
             timer.Start();
         }
@@ -74,27 +96,48 @@ public partial class App : Application
             Visible = true,
         };
         var menu = new Forms.ContextMenuStrip();
+        menu.Items.Add("Settings", null, (_, _) => ShowSettings());
+        menu.Items.Add("-");
         menu.Items.Add("Exit", null, (_, _) => Shutdown());
         _trayIcon.ContextMenuStrip = menu;
+    }
+
+    private void ApplySettingsToWheel()
+    {
+        _wheel.MouseHoverEnabled = _settings.MouseHoverEnabled;
+        _wheel.MouseTakeoverTravel = _settings.MouseTakeoverTravelPx / (_wheel.DpiScale > 0 ? _wheel.DpiScale : 1);
+        _wheel.MouseMinRadius = _settings.MouseMinRadiusDip;
+    }
+
+    private void ShowSettings()
+    {
+        var window = new Views.SettingsWindow(_settings, ApplySettingsToWheel);
+        window.Show();
     }
 
     private void OnTabPressed(object? sender, NavigationDirection direction)
     {
         if (!_wheel.IsOpen)
         {
-            _windows = _windowService.GetWindows();
-            Log.Write($"OnTabPressed: {_windows.Count} windows, open={!_wheel.IsOpen}");
-            if (_windows.Count == 0)
-                return;
-            // Match system Alt+Tab: first press jumps straight to the previous window.
-            int start = _windows.Count > 1 ? 1 : 0;
-            _hook.IsWheelOpen = true;
-            _wheel.Open(_windows, start);
+            OpenWheel();
+            return;
         }
-        else
-        {
-            _wheel.SelectDelta(direction == NavigationDirection.Next ? 1 : -1);
-        }
+        _wheel.SelectDelta(direction == NavigationDirection.Next ? 1 : -1);
+    }
+
+    /// <summary>枚举窗口并按设置构建轮盘项，呼出轮盘。</summary>
+    private void OpenWheel()
+    {
+        _windows = _windowService.GetWindows();
+        _items = _windowService.BuildItems(_windows, _settings);
+        Log.Write($"OpenWheel: {_windows.Count} windows -> {_items.Count} items");
+        if (_items.Count == 0)
+            return;
+        // Match system Alt+Tab: first press jumps straight to the previous window.
+        int start = _items.Count > 1 ? 1 : 0;
+        _hook.IsWheelOpen = true;
+        ApplySettingsToWheel();
+        _wheel.Open(_items, start);
     }
 
     private void OnWheelScrolled(object? sender, NavigationDirection direction) =>
@@ -117,12 +160,37 @@ public partial class App : Application
     {
         if (!_wheel.IsOpen)
             return;
-        var selected = _wheel.SelectedWindow;
+        var item = _wheel.SelectedItem;
+        var childIndex = _wheel.SelectedChildIndex;
         _hook.IsWheelOpen = false;
         _wheel.CloseWheel();
-        Log.Write($"AltReleased: selected={(selected == null ? "null" : selected.ProcessName)}");
-        if (selected != null)
-            WindowActivator.Activate(selected.Handle);
+        Log.Write($"AltReleased: item={(item == null ? "null" : item.ProcessName)}, child={childIndex}");
+        if (item == null)
+            return;
+
+        var target = item.ActivateTarget(childIndex);
+        if (target != null)
+            WindowActivator.Activate(target.Handle);
+        else if (item.IsPinned)
+            LaunchPinned(item);
+    }
+
+    private static void LaunchPinned(WheelItem item)
+    {
+        try
+        {
+            if (item.LaunchPath == null)
+                return;
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = item.LaunchPath,
+                UseShellExecute = true,
+            });
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"LaunchPinned failed: {ex.Message}");
+        }
     }
 
     private void OnEscapePressed(object? sender, EventArgs e)

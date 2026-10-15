@@ -33,6 +33,19 @@ public sealed class GlobalInputHook : IDisposable
     /// <summary>Mouse wheel rotated while Alt is held and the wheel is open.</summary>
     public event EventHandler<NavigationDirection>? WheelScrolled;
 
+    /// <summary>Mouse moved while the wheel is open (screen physical coordinates).</summary>
+    public event EventHandler<NativeMethods.POINT>? MouseMoved;
+
+
+
+    private NativeMethods.POINT _lastMovePosted;
+
+    /// <summary>
+    /// 鼠标移动节流：LL 鼠标钩子按像素级频率到达，超过阈值距离才投递 UI 线程，
+    /// 避免按住 Alt 期间不必要的 Dispatcher 压力。
+    /// </summary>
+    private const int MovePostThresholdPx = 6;
+
     /// <summary>Set by the app: only swallow keys when the wheel is being shown.</summary>
     public bool IsWheelOpen { get; set; }
 
@@ -138,12 +151,31 @@ public sealed class GlobalInputHook : IDisposable
 
     private IntPtr MouseHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
-        if (nCode < 0 || wParam.ToInt64() != NativeMethods.WM_MOUSEWHEEL || !IsWheelOpen)
+        if (nCode < 0)
+            return NativeMethods.CallNextHookEx(_mouseHookId, nCode, wParam, lParam);
+
+        long msg = wParam.ToInt64();
+        if (msg == NativeMethods.WM_MOUSEMOVE && IsWheelOpen)
+        {
+            // 只观察不拦截：鼠标始终归下层窗口/系统使用（IsHitTestVisible=False 同理）。
+            var data = System.Runtime.InteropServices.Marshal.PtrToStructure<NativeMethods.MSLLHOOKSTRUCT>(lParam);
+            int dx = data.pt.X - _lastMovePosted.X;
+            int dy = data.pt.Y - _lastMovePosted.Y;
+            if (dx * dx + dy * dy >= MovePostThresholdPx * MovePostThresholdPx)
+            {
+                _lastMovePosted = data.pt;
+                NativeMethods.POINT pt = data.pt;
+                Post(() => MouseMoved?.Invoke(this, pt));
+            }
+            return NativeMethods.CallNextHookEx(_mouseHookId, nCode, wParam, lParam);
+        }
+
+        if (msg != NativeMethods.WM_MOUSEWHEEL || !IsWheelOpen)
             return NativeMethods.CallNextHookEx(_mouseHookId, nCode, wParam, lParam);
 
         // MSLLHOOKSTRUCT.mouseData high word = wheel delta (WHEEL_DELTA = 120).
-        var data = System.Runtime.InteropServices.Marshal.PtrToStructure<NativeMethods.MSLLHOOKSTRUCT>(lParam);
-        int delta = (short)((data.mouseData >> 16) & 0xFFFF);
+        var wheelData = System.Runtime.InteropServices.Marshal.PtrToStructure<NativeMethods.MSLLHOOKSTRUCT>(lParam);
+        int delta = (short)((wheelData.mouseData >> 16) & 0xFFFF);
         var direction = delta < 0 ? NavigationDirection.Next : NavigationDirection.Previous;
         Post(() => WheelScrolled?.Invoke(this, direction));
         return (IntPtr)1;

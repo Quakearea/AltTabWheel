@@ -22,24 +22,25 @@
                 Width="920" Height="920"
                 HorizontalAlignment="Center" VerticalAlignment="Center"/>
 
+        <!-- 中心徽章（圆形，两行信息） -->
         <Border x:Name="CenterBadge"
-                Width="186" Height="186"
-                CornerRadius="93"
+                Width="200" Height="200"
+                CornerRadius="100"
                 Background="#F21D1D1F"
                 BorderBrush="#3DFFFFFF" BorderThickness="1.5"
                 HorizontalAlignment="Center" VerticalAlignment="Center">
             <Border.Effect>
                 <DropShadowEffect BlurRadius="24" ShadowDepth="0" Opacity="0.35" Color="#000000"/>
             </Border.Effect>
-            <StackPanel VerticalAlignment="Center" Margin="20,0">
+            <StackPanel VerticalAlignment="Center" Margin="22,0">
                 <TextBlock x:Name="CenterProcess"
                            Foreground="#FFFFFF" FontSize="15" FontWeight="SemiBold"
                            TextAlignment="Center" TextTrimming="CharacterEllipsis"
-                           HorizontalAlignment="Center" MaxWidth="146"/>
+                           HorizontalAlignment="Center" MaxWidth="156"/>
                 <TextBlock x:Name="CenterTitle"
                            Foreground="#A6FFFFFF" FontSize="11.5"
                            TextAlignment="Center" TextTrimming="CharacterEllipsis"
-                           TextWrapping="Wrap" MaxHeight="34"
+                           TextWrapping="Wrap" MaxHeight="36"
                            Margin="0,4,0,0"/>
             </StackPanel>
         </Border>
