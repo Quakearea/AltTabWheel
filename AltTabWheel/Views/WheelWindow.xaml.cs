@@ -51,12 +51,16 @@ public partial class WheelWindow : Window
     private readonly List<ScaleTransform> _childScales = new();
 
     private IReadOnlyList<WheelItem> _items = Array.Empty<WheelItem>();
+    private NativeMethods.RECT _workArea = new() { Left = 0, Top = 0, Right = 1920, Bottom = 1080 };
     private int _selectedIndex = -1;   // 顶层选中
     private int _expandedIndex = -1;   // 展开的组（-1 = 无）
     private int _childIndex = -1;      // 子轮盘选中
     private double _ringRadius = 150;
 
     public bool IsOpen { get; private set; }
+
+    /// <summary>选中项（含子轮盘选中）变化通知，用于同步预览轮播。</summary>
+    public event Action? SelectionChanged;
 
     /// <summary>鼠标指向选中开关（由设置注入）。</summary>
     public bool MouseHoverEnabled { get; set; } = true;
@@ -72,6 +76,9 @@ public partial class WheelWindow : Window
 
     /// <summary>窗口所在显示器的缩放（打开轮盘后有效）。</summary>
     public double DpiScale => _dpiScale;
+
+    /// <summary>轮盘覆盖的工作区（物理 px，打开轮盘后有效），预览宿主据此停靠左侧。</summary>
+    public NativeMethods.RECT WorkArea => _workArea;
 
     /// <summary>当前选中项（顶层）。</summary>
     public WheelItem? SelectedItem =>
@@ -149,6 +156,7 @@ public partial class WheelWindow : Window
         };
         if (monitor != IntPtr.Zero && NativeMethods.GetMonitorInfoW(monitor, ref info))
             rect = info.rcWork;
+        _workArea = rect;
 
         double scaleX = 1.0, scaleY = 1.0;
         if (monitor != IntPtr.Zero
@@ -245,6 +253,8 @@ public partial class WheelWindow : Window
             Stretch = Stretch.Uniform,
             Margin = new Thickness(9),
         };
+        // Fant 采样：128px 源 → 显示尺寸的锐利下采样（默认 Linear 发虚）
+        RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.Fant);
 
         // 角标容器：组窗口数量（右下）
         var overlays = new List<UIElement>();
@@ -427,6 +437,24 @@ public partial class WheelWindow : Window
         // 选中合并组立即展开子轮盘（无需再按一次 Tab），首个子项直接选中
         if (_items[index].IsGroup && _expandedIndex != index)
             ExpandChildWheel(index, 0);
+
+        SelectionChanged?.Invoke();
+    }
+
+    /// <summary>后台刷新重建后恢复子轮盘选中位置（组已展开时）。</summary>
+    public void RestoreChildSelection(int childIndex)
+    {
+        if (_expandedIndex >= 0 && childIndex > 0)
+            SelectChild(childIndex);
+    }
+
+    /// <summary>轮盘打开期间静默重建项（后台窗口列表刷新后调用，选中由调用方恢复）。</summary>
+    public void RebuildItems(IReadOnlyList<WheelItem> items)
+    {
+        if (!IsOpen || items.Count == 0)
+            return;
+        _items = items;
+        BuildWheel();
     }
 
     // ---------- 级联子轮盘 ----------
@@ -477,6 +505,7 @@ public partial class WheelWindow : Window
         Panel.SetZIndex(_childSectors[childIndex], 20);
 
         UpdateCenterBadge(group, child: group.Windows[childIndex]);
+        SelectionChanged?.Invoke();
     }
 
     private void CollapseChildWheel()

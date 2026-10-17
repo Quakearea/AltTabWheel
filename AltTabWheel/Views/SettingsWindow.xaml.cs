@@ -17,6 +17,7 @@ public partial class SettingsWindow : Window
 
         MouseHoverBox.IsChecked = settings.MouseHoverEnabled;
         MergeTaskbarBox.IsChecked = settings.MergeTaskbar;
+        ShowPreviewBox.IsChecked = settings.ShowWindowPreview;
         RefreshPinnedList();
     }
 
@@ -51,6 +52,7 @@ public partial class SettingsWindow : Window
     {
         _settings.MouseHoverEnabled = MouseHoverBox.IsChecked == true;
         _settings.MergeTaskbar = MergeTaskbarBox.IsChecked == true;
+        _settings.ShowWindowPreview = ShowPreviewBox.IsChecked == true;
         _settings.Save();
         _onSaved();
         Close();

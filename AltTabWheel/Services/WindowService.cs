@@ -31,6 +31,7 @@ public sealed class WindowService
     };
 
     private readonly Dictionary<IntPtr, AppWindow> _instanceCache = new();
+    private readonly object _gate = new();
     private readonly uint _selfProcessId;
 
     public WindowService()
@@ -38,6 +39,10 @@ public sealed class WindowService
         _selfProcessId = (uint)Environment.ProcessId;
     }
 
+    /// <summary>
+    /// 枚举窗口。可在后台线程调用（UIA 标题读取偶发极慢，放后台避免卡 UI）；
+    /// 内部缓存用锁保护，调用方读返回列表须在枚举完成后（快照语义天然满足）。
+    /// </summary>
     public IReadOnlyList<AppWindow> GetWindows()
     {
         var windows = new List<AppWindow>();
@@ -53,8 +58,11 @@ public sealed class WindowService
         // Drop stale cache entries for closed windows.
         var alive = new HashSet<IntPtr>(windows.Select(w => w.Handle));
         alive.UnionWith(topmost.Select(w => w.Handle));
-        foreach (var key in _instanceCache.Keys.Where(k => !alive.Contains(k)).ToList())
-            _instanceCache.Remove(key);
+        lock (_gate)
+        {
+            foreach (var key in _instanceCache.Keys.Where(k => !alive.Contains(k)).ToList())
+                _instanceCache.Remove(key);
+        }
 
         windows.AddRange(topmost);
         return windows;
@@ -103,11 +111,14 @@ public sealed class WindowService
 
         // Reuse the cached instance (and its extracted icon) while the HWND stays alive.
         // Iconic state is re-snapshotted on activation, so staleness here is harmless.
-        if (_instanceCache.TryGetValue(hWnd, out AppWindow? cached))
+        lock (_gate)
         {
-            cached.Title = title;
-            window = cached;
-            return true;
+            if (_instanceCache.TryGetValue(hWnd, out AppWindow? cached))
+            {
+                cached.Title = title;
+                window = cached;
+                return true;
+            }
         }
 
         var created = new AppWindow
@@ -119,7 +130,8 @@ public sealed class WindowService
             IsIconic = NativeMethods.IsIconic(hWnd),
         };
         created.Icon ??= IconService.GetWindowIcon(hWnd, processId);
-        _instanceCache[hWnd] = created;
+        lock (_gate)
+            _instanceCache[hWnd] = created;
         window = created;
         return true;
     }
@@ -222,8 +234,11 @@ public sealed class WindowService
 
     private string QueryProcessName(uint processId)
     {
-        if (_processNameCache.TryGetValue(processId, out string? cached))
-            return cached;
+        lock (_gate)
+        {
+            if (_processNameCache.TryGetValue(processId, out string? cached))
+                return cached;
+        }
         string name = "unknown";
         try
         {
@@ -234,7 +249,8 @@ public sealed class WindowService
         {
             // Process may exit mid-enumeration or be inaccessible.
         }
-        _processNameCache[processId] = name;
+        lock (_gate)
+            _processNameCache[processId] = name;
         return name;
     }
 }

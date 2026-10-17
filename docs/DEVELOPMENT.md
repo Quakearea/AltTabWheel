@@ -105,6 +105,52 @@ AttachThreadInput(..., false)
 - 所有行为开关默认关闭/保守值，新行为必须显式开启。
 - 固定项 PinnedApps 支持进程名或 exe 绝对路径。
 
+### 2.8 窗口实时预览轮播（DWM Thumbnail，v0.3）
+
+设计移植自 `HalfEllipseCarousel`（tmp8-lbt）：竖直椭圆**左半边**弧（参考原版几何，预览面板停靠工作区左缘），弧长均匀参数化，无限循环 Wrap + 指数阻尼动画（帧率无关，系数 7.5）。
+
+**合成模型（实验证实）**：`DwmRegisterThumbnail` 的缩略图渲染在 destination 窗口客户区
+WPF 内容**之下**（实测截图 docs/d2_zorder.png，三个半透明红块稳定盖住缩略图）。
+由此每张卡 = 下层实时缩略图矩形 + 上层 WPF 罩层（半透明黑 + 白描边 + 圆角遮罩）：
+
+| 规格表参数 | 实现层 | 手段 |
+|---|---|---|
+| 卡片不透明度 | 缩略图 | `DWM_TNP_OPACITY`（中心 100% → ±4 15% → ±5 0%） |
+| 黑色罩层 | WPF 罩层 | Border.Opacity（±1 20% → ±4 68%） |
+| 模糊半径 | —（v1 缺省） | WPF BlurEffect 无法作用于下层元素，需 CompositionBackdropBrush（v2 待办） |
+
+**硬约束**：DWM 缩略图在 `AllowsTransparency`（layered）窗口上**完全不渲染**——宿主必须是
+独立非透明窗口（深色底 + DWMWA_WINDOW_CORNER_PREFERENCE 圆角），与轮盘窗口各自 Topmost。
+
+距离分层公式（与参考实现一致，规格表逐点吻合）：
+```
+opacity: ad<=1 ? 1-0.4*ad : 0.6*max(0,(5-ad)/4)
+dim:     ad<=1 ? 0.2*ad : min(0.85, 0.2+0.16*(ad-1))
+scale:   1-0.45*min(|u|,1)^1.25（|u|>1 继续收缩至 0.30 底）
+u = Wrap(i-current)/4.5，Wrap 环绕到 [-n/2,n/2]（无限循环）
+```
+
+- 动画在 `CompositionTarget.Rendering`（vsync 节拍）里只做 `DwmUpdateThumbnailProperties`
+  矩形更新——与 glazewm 的 perf 方案一致（keypress 不直接打 DWM）。
+- 缩略图注册按 HWND 缓存、跨轮盘开关复用；窗口列表刷新走 diff（新增注册/消失注销）。
+- `rcSource` 按目标宽高比居中裁剪（UniformToFill），窗口比例不变形。
+- 停靠左缘而非跟随轮心：面板右缘若伸到轮心会盖住左侧扇区（首版实测，d2_full.png vs d2_dock.png）。
+- 固定项（未运行）无 HWND 不可预览：选中它时预览关闭，切走恢复（表现为 preview open 重复日志）。
+- **去黑背景的正解是 SetWindowRgn**（窗口形状 = 可见卡的圆角矩形并集，节流 80ms）：
+  WPF 非 layered 窗口交换链不保留 alpha，"透明背景"只是元素树内部概念——
+  DwmEnableBlurBehindWindow / SetWindowCompositionAttribute Acrylic / DWMWA_SYSTEMBACKDROP /
+  Opacity=0.99 **全部实测无效**（黑块依旧）。region 裁剪后间隙与空白处没有窗口，
+  直接露出下层轮盘遮罩。region 外扩 pad 须容纳 2 DIP 选中边框。
+- **DWM 缩略图之间的叠放顺序既非更新序也非注册序**（实测两种假设均与观察矛盾）——
+  正确层次由几何保证：按距离近→远接受卡片，远卡缩略图矩形裁掉与近卡的垂直重叠带
+  （重叠区只显示近卡 = "中间最上，依次往下"的遮挡视觉），罩层保持全尺寸（ZIndex 递降）。
+- **罩层透明度必须放 Background 的 alpha 通道**（Border.Opacity 恒 1）：
+  选中卡 dim≈0 时 Border.Opacity=0 会把亮蓝高亮边框一起透明掉。
+- 布局为竖直椭圆**左半边**（参考原版 cx=0.72w）：选中卡左凸点在面板水平中部 0.46w、
+  y=cy 垂直居中 —— 与轮心同高水平线，窗口位置与轮盘对应。
+  宿主 500×760 DIP（≈屏幕 1/3 宽）；选中卡亮蓝边框 #7AA5FF 2px（ad<0.5）。
+- 窗口数 > 21（MaxThumbs）时超出项不参与轮播（v1 截断）。
+
 ## 3. 已修复的典型 bug（回归警示）
 
 | Bug | 根因 | 教训 |
@@ -115,6 +161,12 @@ AttachThreadInput(..., false)
 | 组合扇区崩溃 | image 先赋 border.Child 又放进 Grid.Children | WPF 逻辑父唯一，换容器先断旧父 |
 | 高 DPI 模糊 | 显示器物理像素直接当 WPF DIP 用 | DIP/物理换算必须按目标屏 DPI |
 | Edge 标题乱码 | 环境 win32k 标题层失真，GetWindowTextW 不可靠 | 见 §7：UIA 优先 |
+
+| 轮播预览（v0.3） | WPF 非 layered 窗口"透明背景"只是元素树内部概念，交换链不保留 alpha | BlurBehind/Acrylic/SYSTEMBACKDROP/Opacity<1 全输出黑块；用 SetWindowRgn 裁剪卡片轮廓 |
+| 轮播预览（v0.3） | DWM 缩略图之间的叠放顺序既非更新序也非注册序 | z 层由几何保证：远卡缩略图矩形裁掉与近卡的重叠带 |
+| 轮播预览（v0.3） | Border.Opacity 作用于整个元素（含边框） | 罩层透明度走 Background alpha，选中卡亮蓝边框才不丢 |
+| 轮播预览（v0.3） | SetWindowRgn 的 pad 未容纳 2 DIP 高亮边框 | region 外扩 pad = ceil(2×dpi)+1 |
+
 
 ## 4. 调试
 
@@ -184,7 +236,8 @@ TitleCodec 作为兜底保留三级清洗：
 ## 10. 已知限制
 
 - 窗口很多（>16）时扇区拥挤，需要分页/螺旋层级布局。
-- 中心窗口小窗预览待重新设计（见 §9）。
+- 预览轮播：模糊半径未实现（需 CompositionBackdropBrush）；窗口 >21 截断；
+  缩略图互相之间的 z 序由 DWM 注册顺序决定（罩层已弱化远处卡，视觉上不明显）。
 - 任务管理器等特殊窗口的激活可能被其自身窗口特性干扰。
 - 个别窗口标题的环境级失真无法完全还原（进程名始终正确）。
 - Z 序为近似 MRU；管理员窗口需以管理员运行本程序（UIPI）。
@@ -209,5 +262,59 @@ TitleCodec 作为兜底保留三级清洗：
 - **合并任务栏**：进程分组 + 数量角标 + 级联子轮盘（选中即自动展开）。
 - **固定任务栏**：固定项半透明展示，无窗口时选中松开 Alt 即启动。
 - 设计演化（否决记录见 §9）：Win+数字 → 数字键 → 取消；中心实时预览 → 快照 → 撤销待定。
+
+### v0.3（2026-10-17）窗口实时预览轮播 + 响应优化 + 图标高清
+
+**需求来源**（第 4、5 轮反馈）：中心预览改为轮播图，设计移植 tmp8-lbt 的
+HalfEllipseCarousel，用户可开关；实时预览指定 DWM Thumbnail API（禁用 PrintWindow/
+屏幕捕获）；优化"响应微慢"与"图标像素模糊"；选中卡必须居中（与轮心同高水平线）、
+加边框、z 层递降、取消黑色矩形背景、预览加大到约 1/3 屏、兼容合并任务栏组导航。
+
+**技术调研**（multi_search，四条结论）：
+- DWM 缩略图在 AllowsTransparency（layered）窗口上**完全不渲染** → 必须独立非透明宿主；
+- AutomationElement.FromHandle 偶发秒级卡顿（SO 报告可达 30s）→ "响应微慢"主凶，
+  绝不能跑在呼出键按下的 UI 线程上；
+- glazewm 的 perf 实践：缩略图矩形更新推迟到 vsync tick（keypress 不直接打 DWM）；
+- 合成顺序无文档 → 自行实验（见下）。
+
+**合成模型实验（d2_zorder.png）**：三个半透明红块稳定盖住 DWM 缩略图 → 缩略图渲染在
+destination 客户区 WPF 内容**之下**。规格表两个独立参数恰好分层映射：
+卡片不透明度 → DWM_TNP_OPACITY（缩略图本体）；黑色罩层 → WPF 罩层 Border
+（上层覆盖）；模糊半径无手段（BlurEffect 只模糊元素自身），记为 v2 待办
+（CompositionBackdropBrush）。
+
+**布局三易**（每版都截图验证）：
+1. 圆扇形（下半弧，选中卡在底部正中）：圆心段切线水平，n 小时卡片肩并肩挤成一团；
+2. 竖直椭圆右半弧（弧顶朝轮盘）：可用，但选中卡在面板右缘、左半空着；
+3. 最终：竖直椭圆**左半弧**参考原版几何（cx=0.72w，弧长均匀参数化），选中卡左凸点在
+   面板水平中部 0.46w、y=cy 垂直居中 —— 与轮心同高水平线，"窗口位置与轮盘对应"。
+另外：宿主改停靠工作区左缘（面板右缘若伸到轮心会盖住左侧扇区，首版实测）；
+尺寸 460×620 → 500×760 DIP（约屏幕 1/3 宽）。
+
+**去黑背景四连败 + 正解**（每步都构建截图验证）：
+DwmEnableBlurBehindWindow → SetWindowCompositionAttribute Acrylic →
+DWMWA_SYSTEMBACKDROP_TYPE + Opacity=0.99 → 全部黑块依旧。根因：WPF 非 layered 窗口
+交换链不保留 alpha，"透明背景"只是元素树内部概念。**正解：SetWindowRgn 把窗口裁剪成
+可见卡的圆角矩形并集**（80ms 节流）——间隙与空白处没有窗口，直接露出轮盘遮罩。
+
+**z 层两实验**：先假设叠放顺序=更新序（按距离远→近更新属性），结果中心卡正确但
+相邻卡之间仍反 → 结论 DWM 缩略图叠放顺序不可控（非更新序、非注册序，与观察均矛盾）。
+**正解：几何确定性方案** —— 按距离近→远接受卡片，远卡缩略图矩形裁掉与近卡的垂直
+重叠带，重叠区只显示近卡（"被遮挡"的视觉由几何保证），罩层保持全尺寸 + ZIndex 递降。
+
+**图标模糊根治**：64px 源在 1.75× DPI 屏上被上采样放大（选中 1.3× 时 64→112 物理 px）→
+统一 128px 2× 渲染 + RenderOptions.BitmapScalingMode=Fant 锐利下采样。
+
+**响应慢根治（快照策略）**：启动 2.5s 后台预热枚举（填图标/进程名/标题缓存）→
+呼出时用上次缓存快照立即显示 → 后台线程重新枚举（UIA 卡顿不阻塞 UI）→ 完成后按 HWND
+保持选中静默重建（WindowService 双缓存加锁）。selftest 改走 OpenWheel 全链路。
+
+**合并任务栏兼容**：轮播目标是"当前激活目标窗口"（含组内子窗口）——
+Select/SelectChild 都 raise SelectionChanged，App 层按 HWND 映射回展平列表索引；
+组选中自动展开子轮盘时预览跟到组内首个子窗口；固定项（未运行）无 HWND 不可预览，
+选中时预览关闭、切走恢复。真实使用日志验证：反复切换 msedge/QQ/explorer/Terminal 正常。
+
+**遗留**：模糊罩层待 CompositionBackdropBrush（v2）；窗口 >21（MaxThumbs）截断；
+DWM 缩略图源窗口销毁后由 Refresh diff 注销。
 
 见 git log。

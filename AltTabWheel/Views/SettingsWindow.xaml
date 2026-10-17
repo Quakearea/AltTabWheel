@@ -29,6 +29,7 @@
             <TextBlock Text="交互" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,4"/>
             <CheckBox x:Name="MouseHoverBox" Content="鼠标指向选中（移动鼠标选择窗口）"/>
             <CheckBox x:Name="MergeTaskbarBox" Content="合并任务栏（同进程合并，选中后展开子轮盘）"/>
+            <CheckBox x:Name="ShowPreviewBox" Content="窗口实时预览（轮盘左侧轮播图，DWM 实时缩略图）"/>
 
             <TextBlock Text="固定任务栏" FontSize="15" FontWeight="SemiBold" Margin="0,22,0,4"/>
             <TextBlock Text="按进程名或 exe 路径固定应用，无窗口时选中并松开 Alt 即启动。"

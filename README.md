@@ -2,9 +2,11 @@
 
 Alt+Tab 轮盘切换器 —— .NET 8 WPF 实现的 Windows 窗口切换替代方案。
 
-按住 Alt 呼出轮盘，窗口图标环形排布；可用键盘、鼠标指向或 Win+数字 选择，松开 Alt 即切换。
+按住 Alt 呼出轮盘，窗口图标环形排布；可用键盘或鼠标指向选择，松开 Alt 即切换。
+轮盘左侧实时预览轮播（DWM 缩略图实时合成）：选中卡居中于面板中部、与轮心同高水平线，
+亮蓝高亮边框，上下卡依次变小变暗退后（z 层递降），卡片悬浮无背景遮挡，可在设置中关闭。
 
-![预览](docs/screenshot.png)
+![预览](docs/d3_final2.png)
 
 ## 交互
 
@@ -42,6 +44,14 @@ Alt+Tab 轮盘切换器 —— .NET 8 WPF 实现的 Windows 窗口切换替代�
 - **鼠标指向**：WH_MOUSE_LL 观察鼠标移动（不拦截、不抢占鼠标），角度命中最近扇区；
   模式仲裁：鼠标累计移动超阈值接管，任何键盘导航立即切回键盘模式。
 - **前台激活**：AttachThreadInput 握手 + SetForegroundWindow，最小化窗口先 SW_RESTORE。
+- **实时预览轮播**：DWM Thumbnail API（DwmRegisterThumbnail，实时合成非快照），
+  HalfEllipseCarousel 设计（竖直椭圆左半弧 + 弧长均匀 + 无限循环 + 按距离三层渐变）。
+  三个硬约束的解法（详见 docs/DEVELOPMENT.md §2.8）：非 layered 独立宿主
+  （layered 窗口不渲染缩略图）；去黑背景用 SetWindowRgn 裁剪卡片轮廓
+  （WPF 非 layered 窗口无 per-pixel alpha，毛玻璃类 API 全部无效）；
+  z 层由几何保证（远卡缩略图裁掉与近卡的重叠带，DWM 叠放顺序不可控）。
+- **呼出响应**：UIA 标题读取偶发极慢 → 启动预热 + 呼出用缓存快照立即显示 + 后台刷新。
+- **图标清晰度**：128px（2×）渲染 + Fant 下采样，高 DPI 不糊。
 
 ## 构建与运行
 
@@ -54,10 +64,11 @@ dotnet build .\AltTabWheel.sln -c Release
 
 托盘图标右键可退出/打开设置。调试日志 %TEMP%\alttabwheel.log。
 
-## 已知限制（v0.2）
+## 已知限制（v0.3）
 
 - 窗口很多（>16）时扇区拥挤，需要分页/螺旋层级布局
-- 图标而非实时缩略图（计划接入 DwmRegisterThumbnail）
+- 预览轮播的模糊罩层待实现（需 CompositionBackdropBrush）；窗口 >21 时超出项不显示；
+  缩略图互相之间的 z 序由裁剪重叠带模拟（静止时完美，动画过渡期间可能有轻微穿帮）
 - 任务管理器等特殊窗口的激活可能被其自身窗口特性干扰
 - 个别窗口标题的环境级编码失真无法完全还原（进程名始终正确）
 - Z 序为近似 MRU；管理员窗口需以管理员运行本程序（UIPI）

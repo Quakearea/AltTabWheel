@@ -120,8 +120,9 @@ public static class NativeMethods
 
     public const int DWMWA_CLOAKED = 14;
 
-    // ---- DWM 实时缩略图（中心窗口预览） ----
+    // ---- DWM 实时缩略图（中心窗口预览轮播） ----
     public const uint DWM_TNP_RECTDESTINATION = 0x00000001;
+    public const uint DWM_TNP_OPACITY = 0x00000004;
     public const uint DWM_TNP_VISIBLE = 0x00000008;
     public const uint DWM_TNP_SOURCECLIENTAREAONLY = 0x00000010;
 
@@ -140,6 +141,77 @@ public static class NativeMethods
 
     [DllImport("dwmapi.dll")]
     public static extern int DwmRegisterThumbnail(IntPtr hwndDestination, IntPtr hwndSource, out IntPtr phThumbnailId);
+
+    /// <summary>查询缩略图源尺寸。pSize 用 16 字节缓冲接收（部分平台按 64 位写入）。</summary>
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmQueryThumbnailSourceSize(IntPtr hThumbnail, IntPtr pSize);
+
+    public const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+    public const int DWMWA_SYSTEMBACKDROP_TYPE = 38;          // Win11 22H2+
+    public const int DWMSBT_TRANSIENTWINDOW = 3;              // Acrylic
+    public const int DWMSBT_MAINWINDOW = 2;                   // Mica
+    public const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+    public const int DWMWCP_ROUND = 2;
+
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute, ref int pvAttribute, int cbAttribute);
+
+    // ---- 毛玻璃客户区（预览宿主去黑背景：透明像素处显示模糊桌面） ----
+    public const uint DWM_BB_ENABLE = 0x00000001;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DWM_BLURBEHIND
+    {
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.Bool)]
+        public bool fEnable;
+        public IntPtr hRgnBlur;   // NULL = 整个客户区
+        [MarshalAs(UnmanagedType.Bool)]
+        public bool fTransitionOnMaximized;
+    }
+
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmEnableBlurBehindWindow(IntPtr hwnd, ref DWM_BLURBEHIND pBlurBehind);
+
+    // ---- SetWindowCompositionAttribute（未文档化但稳定）：无边框窗口毛玻璃/Acrylic 的唯一可靠手段 ----
+    // Win10 1809+ 的 DwmEnableBlurBehindWindow 只剩近黑效果，必须走 ACCENT_POLICY。
+    public const int WCA_ACCENT_POLICY = 19;
+    public const int ACCENT_ENABLE_BLURBEHIND = 3;        // 毛玻璃
+    public const int ACCENT_ENABLE_ACRYLICBLURBEHIND = 4; // Acrylic（需 GradientColor tint）
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct ACCENT_POLICY
+    {
+        public int AccentState;
+        public int AccentFlags;
+        public uint GradientColor;   // ABGR
+        public int AnimationId;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct WINCOMPATTRDATA
+    {
+        public int Attribute;
+        public IntPtr Data;
+        public int SizeOfData;
+    }
+
+    [DllImport("user32.dll")]
+    public static extern bool SetWindowCompositionAttribute(IntPtr hwnd, ref WINCOMPATTRDATA data);
+
+    // ---- 窗口区域裁剪（预览宿主去黑背景的正解：窗口形状 = 卡片轮廓，间隙露出轮盘遮罩） ----
+    public const int RGN_OR = 2;
+
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr CreateRoundRectRgn(int x1, int y1, int x2, int y2, int w, int h);
+
+    [DllImport("gdi32.dll")]
+    public static extern int CombineRgn(IntPtr hrgnDst, IntPtr hrgnSrc1, IntPtr hrgnSrc2, int fnCombineMode);
+
+    /// <summary>SetWindowRgn 的 region 坐标相对窗口左上角（无 NC 窗口即客户区原点）。所有权转移给系统。</summary>
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetWindowRgn(IntPtr hWnd, IntPtr hRgn, bool bRedraw);
 
     [DllImport("dwmapi.dll")]
     public static extern int DwmUnregisterThumbnail(IntPtr hThumbnailId);

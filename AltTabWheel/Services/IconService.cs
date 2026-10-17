@@ -15,10 +15,10 @@ namespace AltTabWheel.Services;
 /// 窗口图标提取（高清版）。
 ///
 /// 清晰度关键：旧版 CreateBitmapSourceFromHIcon 只取系统默认 32×32 图标，
-/// 显示在 ~46px 区域（高 DPI 下更大）必然发虚。本版统一以 64×64 产出：
+/// 显示在 ~46px 区域（高 DPI 下更大）必然发虚。本版统一以 128×128 产出（2× 余量）：
 ///  1. 窗口自身图标 WM_GETICON → DrawIconEx 高质量双三次光栅化到 64×64；
 ///  2. 窗口类图标 GCLP_HICON → 同上；
-///  3. exe 文件图标 → IShellItemImageFactory.GetImage(64, RESIZETOSTRETCH)，
+///  3. exe 文件图标 → IShellItemImageFactory.GetImage(128, RESIZETOSTRETCH)，
 ///     由 Shell 提取 exe 内最大图标（可达 256px）平滑缩放，最清晰；
 ///  4. SHGetFileInfo / ExtractIconEx 最后兜底。
 /// 图标来源：优先应用运行时设置的窗口图标，失败才用文件图标。
@@ -26,7 +26,9 @@ namespace AltTabWheel.Services;
 public static class IconService
 {
     private const uint IconLoadTimeoutMs = 200;
-    private const int IconRasterSize = 64;
+    // 2× 渲染：显示约 46-83 DIP（选中放大），高 DPI 屏下物理像素更高；
+    // 64px 源会被上采样发虚，128px 源走 Fant 下采样后锐利
+    private const int IconRasterSize = 128;
 
     public static ImageSource? GetWindowIcon(IntPtr hwnd, uint processId)
     {
@@ -44,7 +46,7 @@ public static class IconService
             if (hIcon != IntPtr.Zero)
                 return RasterizeIcon(hIcon, IconRasterSize);
 
-            // 3) exe 文件图标：Shell 高清渲染（256px 源平滑缩放到 64）
+            // 3) exe 文件图标：Shell 高清渲染（256px 源平滑缩放到 128）
             string? exePath = GetProcessPath(processId);
             if (exePath != null)
             {

@@ -20,6 +20,9 @@ public sealed class AppSettings
     /// <summary>合并任务栏：同进程窗口合并为一个扇区，选中后展开级联子轮盘。</summary>
     public bool MergeTaskbar { get; set; } = false;
 
+    /// <summary>窗口实时预览：轮盘下方半椭圆轮播图（DWM 缩略图实时合成）。</summary>
+    public bool ShowWindowPreview { get; set; } = true;
+
     /// <summary>固定应用（进程名或 exe 绝对路径），无窗口时也显示在轮盘上。</summary>
     public List<string> PinnedApps { get; set; } = new();
 
