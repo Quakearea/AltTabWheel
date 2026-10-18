@@ -65,8 +65,27 @@ public static class IconService
         return null;
     }
 
-    /// <summary>从文件路径提取图标（固定项/兜底用），同样走 Shell 高清渲染。</summary>
+    // 固定项文件图标缓存：BuildItems 每次刷新都会为未运行的固定项提图标，
+    // Shell 提取是其中最贵的一步（IShellItemImageFactory COM + 位图缩放）。
+    // 产出均为 Freeze 过的 ImageSource，跨线程共享安全。
+    private static readonly Dictionary<string, ImageSource?> FileIconCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly object FileIconGate = new();
+
+    /// <summary>从文件路径提取图标（固定项/兜底用），同样走 Shell 高清渲染。结果按路径缓存。</summary>
     public static ImageSource? GetFileIcon(string path)
+    {
+        lock (FileIconGate)
+        {
+            if (FileIconCache.TryGetValue(path, out var cached))
+                return cached;
+        }
+        var icon = LoadFileIcon(path);
+        lock (FileIconGate)
+            FileIconCache[path] = icon;
+        return icon;
+    }
+
+    private static ImageSource? LoadFileIcon(string path)
     {
         try
         {

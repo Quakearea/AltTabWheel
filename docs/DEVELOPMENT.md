@@ -35,7 +35,10 @@ LL 钩子回调在每次系统输入时执行，必须零成本：
 
 - 只允许：读 vkCode（unsafe 指针）、几个布尔判定、返回 1 或 CallNextHookEx。
 - 禁止：IO、日志、分配（闭包）、Marshal.PtrToStructure（鼠标钩子除外，移动低频）、UI 操作。
-- UI 工作一律 Dispatcher.BeginInvoke 投递；鼠标移动在钩子侧做 6px 阈值节流。
+- Alt/Shift 状态由钩子消息流自行跟踪（v0.4 起），不再调 GetAsyncKeyState。
+- UI 工作一律用预分配无闭包委托经 Dispatcher.BeginInvoke 投递（v0.4 起）；
+  鼠标移动在钩子侧做 6px 阈值节流，坐标经字段传递（`_pendingMousePt`）。
+- 鼠标钩子按需安装：轮盘关闭时卸载 WH_MOUSE_LL（v0.4 起），避免全系统鼠标消息无谓调度。
 
 ### 2.2 轮盘几何约定（确定性，保肌肉记忆）
 
@@ -316,5 +319,67 @@ Select/SelectChild 都 raise SelectionChanged，App 层按 HWND 映射回展平�
 
 **遗留**：模糊罩层待 CompositionBackdropBrush（v2）；窗口 >21（MaxThumbs）截断；
 DWM 缩略图源窗口销毁后由 Refresh diff 注销。
+
+### v0.4（2026-10-18）性能优化 + 选中窗口↔轮盘对应修复
+
+性能审计后的第一批优化，Debug/Release 构建 0 警告，selftest + 物理按键 + 截图验证通过：
+
+- **预览渲染循环收敛即停**（最大收益）：原来预览打开期间 CompositionTarget.Rendering
+  永久 vsync 运行——即使动画收敛仍每帧全量布局 + 逐卡 DwmUpdateThumbnailProperties
+  （21 卡 × 60fps）。现在 `_current` 收敛且无挂起变化（`_needsFrame`）时退订渲染循环，
+  `SetTarget`/`Refresh`/`Open` 重新订阅；收敛帧强制刷 SetWindowRgn（补偿动画期 80ms 节流）。
+  预览静止期间 CPU 归零；DWM 缩略图内容实时性由 DWM 自绘保证，与本循环无关。
+- **UpdateLayoutFrame 零分配**：FrameLayout/排序数组/可见卡列表全部池化复用；
+  `frames.OrderBy+Sort` 换 Array.Sort 键值对一次排序（接受 pass 正序、应用 pass 逆序）；
+  每卡 2 个 new SolidColorBrush 换 256 级 alpha 量化共享冻结画刷（选中边框单例）。
+  原来 60fps × 21 卡 ≈ 每秒 2500+ 次画刷分配持续打 Gen0 GC。
+- **键盘钩子热路径零 P/Invoke**：Alt/Shift 状态由钩子消息流自行跟踪（所有键盘消息
+  必经本回调），替代每次按键 3-4 次 GetAsyncKeyState；初值在 Install 冷路径同步一次。
+  投递全部改用预分配无闭包委托（`_raiseTabNext` 等字段），热路径真正零分配。
+- **鼠标钩子按需安装**：WH_MOUSE_LL 常驻会让全系统每个鼠标消息都调度进本进程消息
+  循环；现在 `IsWheelOpen` setter 联动安装/卸载，轮盘关闭期间鼠标路径零成本。
+- **MouseMoved 双重调度修复**：钩子侧已 BeginInvoke 到 UI 线程，App 层原来再包一层
+  Dispatcher.BeginInvoke（双重调度 + 闭包分配），改为直接调 WheelWindow.HandleMouseMove。
+
+**选中窗口↔轮盘对应修复（根因两处叠加）**：
+
+- **预览条目顺序滞留**：SyncEntries 旧实现只按首次注册序追加、跨呼出复用，而
+  调用方按当前 z-order 算索引传 SetTarget——任何一次窗口切换改变 z-order 后，
+  索引就指向错误的条目，预览高亮/居中错窗口。现在 SyncEntries 把 `_entries`
+  重排到与传入列表严格同序（条目对象复用，DWM 缩略图注册按 HWND 原样保留），
+  并用序列比较检测增/删/换位：完全不变时连罩层池重建都跳过。
+- **预览顺序 ≠ 轮盘顺序**：预览数据源从扁平 `_windows`（z-order）改为
+  `_items` 按轮盘遍历序展平（组内窗口原位展开，无窗口固定项不产生条目），
+  轮盘相邻扇区 = 轮播相邻卡，Tab/方向键/鼠标导航方向感一致。
+- **去索引映射**：`SetTarget(int)` 改 `SetTarget(IntPtr handle)`，预览侧按 HWND
+  自查条目索引，跨列表索引映射这一整类 bug 从结构上消除；超 MaxThumbs 截断的
+  窗口返回 false，App 收掉预览（任何卡片高亮都会误导）。
+
+**第二批优化（刷新链路 / 缓存 / 日志 / GPU 资源）**：
+
+- **后台刷新 diff 跳过重建**：`ItemsStructurallyEqual`（项数/固定标记/组内 HWND
+  序列）没变时跳过 RebuildItems + 重选（原来每次呼出后 ~1s 必有一次全量
+  BuildWheel 重建 + 闪烁）；选中窗口在刷新期间关闭时落到原索引最近存活项
+  （对齐系统 Alt+Tab 位置保持）。
+- **刷新合并防抖**：枚举中的请求合并为一次尾随刷新；距上次开始 <900ms 的请求
+  进防抖定时器——快速开关轮盘不再每次付全量 UIA 枚举。
+- **进程名直查 syscall**：`Process.GetProcessById` → OpenProcess(QUERY_LIMITED)
+  + QueryFullProcessImageNameW（一次句柄 + 一次 syscall，无对象分配/访问拒绝
+  异常）；`_processNameCache` 按本次枚举存活 pid 修剪（pid 复用陈旧名随进程
+  退出清除；旧进程退出与新进程复用 pid 发生在同次枚举间隔内的残余边缘除外）。
+- **固定项图标缓存**：`IconService.GetFileIcon` 按路径缓存（Shell COM 提取是
+  BuildItems 里最贵的一步，原来每次刷新对每个未运行固定项都重做）。
+- **日志常驻 StreamWriter**：AppendAllText 每行 open/ACL/write/close 一次文件，
+  改 AutoFlush 常驻写入器（锁内，任意线程可写）。
+- **轮盘扇区共享冻结阴影**：每扇区 new DropShadowEffect（每个占一份 GPU 资源）
+  → 单个冻结静态实例全扇区共享。
+
+验证：`--selftest-reorder`（新测试钩子：开轮盘 → t+5s 程序化激活非选中窗口
+改变 z-order → t+6s 后台刷新触发预览条目重排 → t+7s 导航一次）。截图确认：
+呼出时预览高亮卡 = 轮盘选中（微信）；z-order 重排 + 导航后预览高亮卡 = 新选中
+（WINWORD），全程无错位。Debug/Release 0 警告。
+
+遗留优化候选：UIA 标题事件驱动失效（WinEvent EVENT_OBJECT_NAMECHANGE）；
+Alt+Tab 无条件吞键在缓存为空时导致无法切换（应回退系统行为）。
 
 见 git log。

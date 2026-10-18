@@ -27,6 +27,8 @@ public static class NativeMethods
     public const uint VK_LMENU = 0xA4;
     public const uint VK_RMENU = 0xA5;
     public const uint VK_SHIFT = 0x10;
+    public const uint VK_LSHIFT = 0xA0;
+    public const uint VK_RSHIFT = 0xA1;
     public const uint VK_TAB = 0x09;
     public const uint VK_ESCAPE = 0x1B;
     public const uint VK_LEFT = 0x25;
@@ -59,6 +61,18 @@ public static class NativeMethods
 
     [DllImport("user32.dll")]
     public static extern short GetAsyncKeyState(int vKey);
+
+    // ---- Process query（进程名/图标路径用，替代昂贵的 Process.GetProcessById） ----
+    public const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr OpenProcess(uint dwDesiredAccess, [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, uint dwProcessId);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool QueryFullProcessImageNameW(IntPtr hProcess, uint dwFlags, [Out] char[] lpExeName, ref uint lpdwSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool CloseHandle(IntPtr hObject);
 
     // ---- Window enumeration / inspection ----
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);

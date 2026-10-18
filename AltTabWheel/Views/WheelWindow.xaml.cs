@@ -40,6 +40,22 @@ public partial class WheelWindow : Window
     private static readonly Brush TrackBrush = new SolidColorBrush(Color.FromArgb(0x21, 0xFF, 0xFF, 0xFF));
     private static readonly Brush GroupBadgeBackground = new SolidColorBrush(Color.FromArgb(0xFF, 0x4A, 0x4A, 0x52));
 
+    /// <summary>扇区共享的冻结阴影（每扇区 new 一个 DropShadowEffect = 每个都占一份 GPU 资源）。</summary>
+    private static readonly System.Windows.Media.Effects.DropShadowEffect SectorShadow = CreateSectorShadow();
+
+    private static System.Windows.Media.Effects.DropShadowEffect CreateSectorShadow()
+    {
+        var effect = new System.Windows.Media.Effects.DropShadowEffect
+        {
+            BlurRadius = 12,
+            ShadowDepth = 0,
+            Opacity = 0.3,
+            Color = Colors.Black,
+        };
+        effect.Freeze();
+        return effect;
+    }
+
     // 顶层扇区
     private readonly List<Grid> _sectors = new();
     private readonly List<ScaleTransform> _scales = new();
@@ -79,6 +95,9 @@ public partial class WheelWindow : Window
 
     /// <summary>轮盘覆盖的工作区（物理 px，打开轮盘后有效），预览宿主据此停靠左侧。</summary>
     public NativeMethods.RECT WorkArea => _workArea;
+
+    /// <summary>当前选中索引（顶层，-1 = 无）。刷新后选中窗口消失时用于位置保持。</summary>
+    public int SelectedIndex => _selectedIndex;
 
     /// <summary>当前选中项（顶层）。</summary>
     public WheelItem? SelectedItem =>
@@ -238,13 +257,7 @@ public partial class WheelWindow : Window
             Width = size,
             Height = size,
             Opacity = item.IsPinned ? 0.62 : 1.0,
-            Effect = new System.Windows.Media.Effects.DropShadowEffect
-            {
-                BlurRadius = 12,
-                ShadowDepth = 0,
-                Opacity = 0.3,
-                Color = Colors.Black,
-            },
+            Effect = SectorShadow,
         };
 
         var image = new Image

@@ -47,28 +47,32 @@ public sealed class WindowService
     {
         var windows = new List<AppWindow>();
         var topmost = new List<AppWindow>();
+        var alivePids = new HashSet<uint>();
 
         NativeMethods.EnumWindows((hWnd, _) =>
         {
-            if (TryCreateWindow(hWnd, out AppWindow? window) && window is not null)
+            if (TryCreateWindow(hWnd, alivePids, out AppWindow? window) && window is not null)
                 (window.IsTopmost ? topmost : windows).Add(window);
             return true;
         }, IntPtr.Zero);
 
-        // Drop stale cache entries for closed windows.
+        // Drop stale cache entries for closed windows / exited processes.
+        // 进程名缓存按本次枚举存活 pid 修剪：pid 复用造成的陈旧名字随进程退出一起清掉。
         var alive = new HashSet<IntPtr>(windows.Select(w => w.Handle));
         alive.UnionWith(topmost.Select(w => w.Handle));
         lock (_gate)
         {
             foreach (var key in _instanceCache.Keys.Where(k => !alive.Contains(k)).ToList())
                 _instanceCache.Remove(key);
+            foreach (var pid in _processNameCache.Keys.Where(k => !alivePids.Contains(k)).ToList())
+                _processNameCache.Remove(pid);
         }
 
         windows.AddRange(topmost);
         return windows;
     }
 
-    private bool TryCreateWindow(IntPtr hWnd, out AppWindow? window)
+    private bool TryCreateWindow(IntPtr hWnd, HashSet<uint> alivePids, out AppWindow? window)
     {
         window = null;
 
@@ -97,6 +101,7 @@ public sealed class WindowService
         NativeMethods.GetWindowThreadProcessId(hWnd, out processId);
         if (processId == 0 || processId == _selfProcessId)
             return false;
+        alivePids.Add(processId);
 
         var title = ReadTitle(hWnd);
         if (title.Length == 0)
@@ -232,6 +237,11 @@ public sealed class WindowService
 
     private readonly Dictionary<uint, string> _processNameCache = new();
 
+    /// <summary>
+    /// 进程名 = 主模块文件名去扩展名（与 Process.ProcessName 一致），
+    /// 但走 OpenProcess + QueryFullProcessImageNameW：一次句柄 + 一次 syscall，
+    /// 没有 Process.GetProcessById 的对象分配与访问拒绝异常开销。
+    /// </summary>
     private string QueryProcessName(uint processId)
     {
         lock (_gate)
@@ -240,14 +250,20 @@ public sealed class WindowService
                 return cached;
         }
         string name = "unknown";
-        try
+        IntPtr handle = NativeMethods.OpenProcess(NativeMethods.PROCESS_QUERY_LIMITED_INFORMATION, false, processId);
+        if (handle != IntPtr.Zero)
         {
-            using var process = System.Diagnostics.Process.GetProcessById((int)processId);
-            name = process.ProcessName;
-        }
-        catch
-        {
-            // Process may exit mid-enumeration or be inaccessible.
+            try
+            {
+                uint size = 1024;
+                var buffer = new char[(int)size];
+                if (NativeMethods.QueryFullProcessImageNameW(handle, 0, buffer, ref size) && size > 0)
+                    name = Path.GetFileNameWithoutExtension(new string(buffer, 0, (int)size));
+            }
+            finally
+            {
+                NativeMethods.CloseHandle(handle);
+            }
         }
         lock (_gate)
             _processNameCache[processId] = name;
