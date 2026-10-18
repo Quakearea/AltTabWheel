@@ -20,18 +20,21 @@ namespace AltTabWheel.Views;
 /// 合成模型（实验证实，docs/d2_zorder.png）：
 ///  - 本窗口是非 layered 宿主（DWM 缩略图在 AllowsTransparency 窗口上不渲染）；
 ///  - DWM 缩略图渲染在客户区 WPF 内容**之下**，因此每张卡 = 下层的实时缩略图矩形
-///    + 上层的 WPF 罩层（半透明黑 + 描边 + 圆角遮罩）；
+///    + 上层的 WPF 罩层（半透明黑 + 描边）；
 ///  - 规格表两个独立参数恰好分层映射：
 ///      卡片不透明度 → DWM_TNP_OPACITY（中心 100% → ±4 15% → ±5 0%）
-///      黑色罩层     → 罩层 Border.Opacity（±1 20% → ±4 68%）
+///      黑色罩层     → v0.5 已取消（"黑布"观感），罩层 Border 只承担描边
 ///  - 模糊半径（1.2~4.8px）：WPF BlurEffect 无法作用于下层缩略图，
 ///    需 CompositionBackdropBrush（v2 待办），v1 由罩层近似。
-///  - 选中卡亮蓝高亮边框（ad<0.5，与轮盘选中扇区同色 #7AA5FF）。
+///  - 选中卡亮蓝高亮边框（ad<0.5，与轮盘选中扇区同色 #7AA5FF），
+///    其余卡统一 1px 半透明白描边（v0.5：卡片边界清晰，缝隙不再像漏黑）。
 ///
 /// 其他关键决策：
-///  - 背景去黑块：Background=Transparent + DwmEnableBlurBehindWindow 毛玻璃；
+///  - 背景：无任何背景合成（v0.3 实验否决 + v0.5 复测确认 systembackdrop
+///    不随 region 裁剪、会铺整幅暗底）；卡片轮廓之外没有窗口（SetWindowRgn 逐帧）；
 ///  - 停靠工作区左缘（面板右缘若伸到轮心会盖住左侧扇区，首版实测）；
-///  - 缩略图矩形内缩 CardGap，罩层圆角才能完全遮住缩略图直角；
+///  - 直角卡片：DWM 缩略图恒为直角矩形，圆角罩层遮不住缩略图顶出的直角
+///    （边角遮挡无可靠解，v0.5 起弃用圆角）；CardGap 仅作卡片分隔缝；
 ///  - 与合并任务栏兼容：轮播目标 = 当前激活目标窗口（含组内子窗口），
 ///    组/子轮盘导航都经 SelectionChanged → SyncPreview 按 HWND 映射回展平列表；
 ///  - 缩略图注册按 HWND 缓存、跨轮盘开关复用；窗口列表刷新走 diff；
@@ -50,8 +53,7 @@ public partial class PreviewCarouselWindow : Window
     private const double RadiusB = HostH * 0.385;   // 293：垂直半径
     private static readonly double BaseCardW = Math.Min(HostH * 0.42, HostW * 0.86);  // 319
     private const double CardRatio = 0.62;          // 横向长方形
-    private const double CardGap = 3.0;             // 缩略图内缩（罩层圆角遮住直角 + 卡片分隔）
-    private const double CornerR = 16;              // 罩层圆角
+    private const double CardGap = 3.0;             // 缩略图内缩（卡片分隔缝隙）
 
     // 停靠参数：预览面板固定在轮盘工作区左缘、垂直居中，
     // 右半边弧顶（选中大卡）朝右指向轮盘，与左侧扇区间留 MarginFromEdge
@@ -62,6 +64,9 @@ public partial class PreviewCarouselWindow : Window
         public required IntPtr Handle;          // 源窗口 HWND
         public IntPtr ThumbnailId;              // DWM 缩略图 ID（Zero = 注册失败）
         public NativeMethods.SIZE SourceSize;   // 源窗口尺寸（rcSource 裁剪用）
+        // 无实时内容可显示（注册失败 / 源尺寸为 0，如全屏独占 DX 窗口）：
+        // 缩略图必为纯黑，卡片改用深灰占位底而不是露出黑色窗口背景
+        public bool NoThumb => ThumbnailId == IntPtr.Zero || SourceSize.cx <= 0 || SourceSize.cy <= 0;
     }
 
     private readonly List<ThumbEntry> _entries = new();
@@ -82,6 +87,7 @@ public partial class PreviewCarouselWindow : Window
     private static readonly System.Windows.Media.SolidColorBrush[] DimBrushes = BuildAlphaBrushes(0x00, 0x00, 0x00);
     private static readonly System.Windows.Media.SolidColorBrush[] WhiteBorderBrushes = BuildAlphaBrushes(0xFF, 0xFF, 0xFF);
     private static readonly System.Windows.Media.SolidColorBrush SelectedBorderBrush = MakeFrozenBrush(0xFF, 0x7A, 0xA5, 0xFF);
+    private static readonly System.Windows.Media.SolidColorBrush PlaceholderBrush = MakeFrozenBrush(0xFF, 0x2B, 0x2B, 0x30);
 
     private static System.Windows.Media.SolidColorBrush MakeFrozenBrush(byte a, byte r, byte g, byte b)
     {
@@ -140,13 +146,15 @@ public partial class PreviewCarouselWindow : Window
         var exStyle = NativeMethods.GetWindowLongPtr(hwnd, NativeMethods.GWL_EXSTYLE).ToInt64();
         NativeMethods.SetWindowLongPtr(hwnd, NativeMethods.GWL_EXSTYLE,
             exStyle | NativeMethods.WS_EX_NOACTIVATE | NativeMethods.WS_EX_TOOLWINDOW);
-        // Win11 圆角 + 深色框（非透明窗口的圆角只能由 DWM 提供）
-        int one = 1, round = NativeMethods.DWMWCP_ROUND;
+        // 深色框（窗口本体形状完全由 SetWindowRgn 卡片矩形并集决定，DWM 圆角偏好不适用）
+        int one = 1, round = NativeMethods.DWMWCP_DONOTROUND;
         NativeMethods.DwmSetWindowAttribute(hwnd, NativeMethods.DWMWA_USE_IMMERSIVE_DARK_MODE, ref one, sizeof(int));
         NativeMethods.DwmSetWindowAttribute(hwnd, NativeMethods.DWMWA_WINDOW_CORNER_PREFERENCE, ref round, sizeof(int));
-        // 去黑背景的正解不是窗口透明（WPF 非 layered 交换链不保留 alpha，
-        // BlurBehind/Acrylic/Opacity 全部实测无效），而是 SetWindowRgn 把窗口
-        // 裁剪成卡片轮廓集合 —— 间隙与空白处没有窗口，直接露出轮盘遮罩。
+        // 背景合成类 API（systembackdrop/ACCENT/blurbehind）一律不用——
+        // v0.3 已实验否决（WPF 非 layered 交换链不保留 alpha），v0.5 复测确认：
+        // systembackdrop 由 DWM 按窗口外框整幅绘制、不随 SetWindowRgn 裁剪，
+        // 卡片背后会铺一块贯穿整个面板的暗色底布。正解维持 v0.3 结论：
+        // SetWindowRgn 逐帧把窗口裁成卡片矩形并集，卡片轮廓之外没有窗口。
     }
 
     /// <summary>显示轮播宿主（工作区左缘、垂直居中）并对窗口列表注册缩略图。</summary>
@@ -238,11 +246,19 @@ public partial class PreviewCarouselWindow : Window
                 continue;
             }
             var entry = new ThumbEntry { Handle = window.Handle };
-            if (NativeMethods.DwmRegisterThumbnail(hostHwnd, window.Handle, out IntPtr thumbId) == 0
-                && thumbId != IntPtr.Zero)
+            int hr = NativeMethods.DwmRegisterThumbnail(hostHwnd, window.Handle, out IntPtr thumbId);
+            if (hr == 0 && thumbId != IntPtr.Zero)
             {
                 entry.ThumbnailId = thumbId;
                 entry.SourceSize = QuerySourceSize(thumbId);
+                // 源尺寸为 0 = 该窗口无可合成内容（全屏独占 DX/特殊窗口），
+                // 缩略图将渲染为纯黑——记录以便诊断"黑卡"
+                if (entry.SourceSize.cx <= 0 || entry.SourceSize.cy <= 0)
+                    Log.Write($"preview thumb EMPTY source: {window.Title} (0x{window.Handle:X}) iconic={window.IsIconic}");
+            }
+            else
+            {
+                Log.Write($"preview thumb register FAILED hr=0x{hr:X8}: {window.Title} (0x{window.Handle:X}) iconic={window.IsIconic}");
             }
             next.Add(entry);
             _byHandle[window.Handle] = entry;
@@ -290,7 +306,6 @@ public partial class PreviewCarouselWindow : Window
         {
             var dim = new Border
             {
-                CornerRadius = new CornerRadius(CornerR),
                 Background = new SolidColorBrush(Color.FromArgb(0x00, 0x00, 0x00, 0x00)),
                 BorderThickness = new Thickness(1),
                 IsHitTestVisible = false,
@@ -393,23 +408,16 @@ public partial class PreviewCarouselWindow : Window
         }
 
         _needsFrame = false;
-        // 收敛帧强制刷 SetWindowRgn（动画期间 80ms 节流，最后一帧必须拿到精确轮廓）
-        UpdateLayoutFrame(forceRegion: settled);
+        UpdateLayoutFrame();
     }
 
-    private DateTime _lastRgnUpdate = DateTime.MinValue;
-
     /// <summary>
-    /// 把窗口区域裁剪为可见卡的圆角矩形并集（物理 px，窗口坐标）。
-    /// 节流 ~80ms：SetWindowRgn 会触发 DWM 重裁剪，导航动画期间不必每帧都付这个成本。
+    /// 把窗口区域裁剪为可见卡的矩形并集（物理 px，窗口坐标）。
+    /// 每帧直刷：n ≤ 21 的 region 重建是微秒级，而 80ms 节流曾让 region 以 ~12fps
+    /// 追赶 60fps 的缩略图动画，错位帧露出黑色残块（v0.5 前的"黑块抖动"观感）。
     /// </summary>
-    private void UpdateWindowRegion(List<(double X, double Y, double W, double H)> cards, bool force = false)
+    private void UpdateWindowRegion(List<(double X, double Y, double W, double H)> cards)
     {
-        var now = DateTime.UtcNow;
-        if (!force && (now - _lastRgnUpdate).TotalMilliseconds < 80)
-            return;
-        _lastRgnUpdate = now;
-
         var hwnd = new WindowInteropHelper(this).Handle;
         if (cards.Count == 0)
         {
@@ -420,10 +428,9 @@ public partial class PreviewCarouselWindow : Window
         foreach (var (x, y, w, h) in cards)
         {
             int pad = (int)Math.Ceiling(2 * _dpi) + 1;   // 罩层 2 DIP 高亮边框须在窗口内
-            IntPtr card = NativeMethods.CreateRoundRectRgn(
+            IntPtr card = NativeMethods.CreateRectRgn(
                 (int)Math.Floor(x * _dpi) - pad, (int)Math.Floor(y * _dpi) - pad,
-                (int)Math.Ceiling((x + w) * _dpi) + pad, (int)Math.Ceiling((y + h) * _dpi) + pad,
-                (int)(CornerR * 2 * _dpi), (int)(CornerR * 2 * _dpi));
+                (int)Math.Ceiling((x + w) * _dpi) + pad, (int)Math.Ceiling((y + h) * _dpi) + pad);
             NativeMethods.CombineRgn(union, union, card, NativeMethods.RGN_OR);
             NativeMethods.DeleteObject(card);
         }
@@ -444,7 +451,7 @@ public partial class PreviewCarouselWindow : Window
         public bool ThumbVisible = true;
     }
 
-    private void UpdateLayoutFrame(bool forceRegion = false)
+    private void UpdateLayoutFrame()
     {
         int n = _entries.Count;
         if (n == 0)
@@ -473,11 +480,11 @@ public partial class PreviewCarouselWindow : Window
 
             // ---- 距离分层规格（见类注释表） ----
             double opacity = ad <= 1
-                ? 1 - 0.4 * ad
-                : 0.6 * Math.Max(0, (5 - ad) / 4);
-            double dimOpacity = ad <= 1
-                ? 0.2 * ad
-                : Math.Min(0.85, 0.2 + 0.16 * (ad - 1));
+                ? 1 - 0.35 * ad
+                : 0.65 * Math.Max(0, (5 - ad) / 4);
+            // v0.5 取消黑色罩层：半透明黑蒙在缩略图上即"黑布"观感，
+            // 远卡完全靠缩略图自身透明度退场；罩层 Border 只剩描边职责
+            const double dimOpacity = 0;
             // 模糊半径 min(8, 1.2·ad)：v1 无手段作用于下层缩略图（待 CompositionBackdropBrush）
 
             frame.D = d; frame.Ad = ad; frame.U = u; frame.Au = au;
@@ -598,8 +605,11 @@ public partial class PreviewCarouselWindow : Window
             Canvas.SetLeft(dim, x);
             Canvas.SetTop(dim, y);
             dim.Opacity = 1;
-            // 共享冻结画刷（alpha 量化 256 级）：替代每帧 new SolidColorBrush ×2
-            dim.Background = DimBrushes[(byte)Math.Round(255 * frame.DimOpacity)];
+            // 共享冻结画刷（alpha 量化 256 级）：替代每帧 new SolidColorBrush ×2；
+            // NoThumb 卡铺深灰占位底（缩略图为纯黑时盖住黑底，占位观感 > 黑块）
+            dim.Background = frame.Entry.NoThumb
+                ? PlaceholderBrush
+                : DimBrushes[(byte)Math.Round(255 * frame.DimOpacity)];
             if (ad < 0.5)
             {
                 // 选中卡：亮蓝高亮边框（与轮盘选中扇区同色），罩层最上层
@@ -609,16 +619,16 @@ public partial class PreviewCarouselWindow : Window
             }
             else
             {
-                // 远处卡：白色描边随距离渐淡；z 层按距离递降 ——
-                // 中间卡最上层，±1 在下一层，依次往下（罩层间互相遮盖形成层次）
-                byte borderAlpha = (byte)Math.Round(70 * Math.Max(0, 1 - au));
+                // 所有卡统一 1px 描边（v0.5：原渐淡到 0 让远卡失去边界，缝隙黑更显眼）；
+                // z 层按距离递降 —— 中间卡最上层，±1 在下一层，依次往下
+                byte borderAlpha = (byte)Math.Round(Math.Max(45, 70 * Math.Max(0, 1 - au)));
                 dim.BorderBrush = WhiteBorderBrushes[borderAlpha];
                 dim.BorderThickness = new Thickness(1);
                 Panel.SetZIndex(dim, 10000 - (int)(ad * 1000));
             }
         }
 
-        UpdateWindowRegion(_visibleCards, forceRegion);
+        UpdateWindowRegion(_visibleCards);
     }
 
     private static void HideCard(ThumbEntry entry, Border dim)

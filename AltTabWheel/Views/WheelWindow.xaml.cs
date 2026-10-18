@@ -250,7 +250,6 @@ public partial class WheelWindow : Window
     {
         var border = new Border
         {
-            CornerRadius = new CornerRadius(14),
             Background = item.IsPinned ? PinnedBackground : SectorBackground,
             BorderBrush = SectorBorder,
             BorderThickness = new Thickness(1.5),

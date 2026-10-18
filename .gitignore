@@ -17,3 +17,10 @@ Desktop.ini
 
 # Scratch/diagnostics
 scratch/
+
+# 开发文档与诊断工具不进发布仓库
+docs/
+scratch/
+
+# 个人草稿
+README_mine.md

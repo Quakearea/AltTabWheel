@@ -165,6 +165,7 @@ public static class NativeMethods
     public const int DWMSBT_TRANSIENTWINDOW = 3;              // Acrylic
     public const int DWMSBT_MAINWINDOW = 2;                   // Mica
     public const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+    public const int DWMWCP_DONOTROUND = 1;
     public const int DWMWCP_ROUND = 2;
 
     [DllImport("dwmapi.dll")]
@@ -218,6 +219,36 @@ public static class NativeMethods
 
     [DllImport("gdi32.dll")]
     public static extern IntPtr CreateRoundRectRgn(int x1, int y1, int x2, int y2, int w, int h);
+
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr CreateRectRgn(int x1, int y1, int x2, int y2);
+
+    // ---- 位图像素直读（绕开 CreateBitmapSourceFromHBitmap 的 alpha 语义丢失，图标黑边修复） ----
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetDC(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct BITMAPINFOHEADER
+    {
+        public uint biSize;
+        public int biWidth;
+        public int biHeight;        // 负值 = 自顶向下
+        public ushort biPlanes;
+        public ushort biBitCount;
+        public uint biCompression;  // 0 = BI_RGB
+        public uint biSizeImage;
+        public int biXPelsPerMeter;
+        public int biYPelsPerMeter;
+        public uint biClrUsed;
+        public uint biClrImportant;
+    }
+
+    [DllImport("gdi32.dll")]
+    public static extern int GetDIBits(IntPtr hdc, IntPtr hbm, uint start, uint cLines,
+        byte[] lpvBits, ref BITMAPINFOHEADER lpbmi, uint usage);
 
     [DllImport("gdi32.dll")]
     public static extern int CombineRgn(IntPtr hrgnDst, IntPtr hrgnSrc1, IntPtr hrgnSrc2, int fnCombineMode);
@@ -342,6 +373,37 @@ public static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool DestroyIcon(IntPtr handle);
+
+    /// <summary>查询 HICON 信息（取位图以获知图标原生尺寸，判据：小图标上采样必糊）。</summary>
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetIconInfo(IntPtr hIcon, out ICONINFO piconinfo);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct ICONINFO
+    {
+        [MarshalAs(UnmanagedType.Bool)]
+        public bool fIcon;
+        public int xHotspot;
+        public int yHotspot;
+        public IntPtr hbmMask;
+        public IntPtr hbmColor;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct BITMAP
+    {
+        public int bmType;
+        public int bmWidth;
+        public int bmHeight;
+        public int bmWidthBytes;
+        public ushort bmPlanes;
+        public ushort bmBitsPixel;
+        public IntPtr bmBits;
+    }
+
+    [DllImport("gdi32.dll")]
+    public static extern int GetObjectW(IntPtr h, int c, out BITMAP lpvObject);
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

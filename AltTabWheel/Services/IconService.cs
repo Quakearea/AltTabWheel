@@ -2,8 +2,6 @@ using System.IO;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
-using System.Windows;
-using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using PixelFormat = System.Drawing.Imaging.PixelFormat;
@@ -12,57 +10,87 @@ using IShellItemImageFactory = AltTabWheel.NativeMethods.IShellItemImageFactory;
 namespace AltTabWheel.Services;
 
 /// <summary>
-/// 窗口图标提取（高清版）。
+/// 窗口图标提取（高清版 v2）。
 ///
-/// 清晰度关键：旧版 CreateBitmapSourceFromHIcon 只取系统默认 32×32 图标，
-/// 显示在 ~46px 区域（高 DPI 下更大）必然发虚。本版统一以 128×128 产出（2× 余量）：
-///  1. 窗口自身图标 WM_GETICON → DrawIconEx 高质量双三次光栅化到 64×64；
-///  2. 窗口类图标 GCLP_HICON → 同上；
-///  3. exe 文件图标 → IShellItemImageFactory.GetImage(128, RESIZETOSTRETCH)，
-///     由 Shell 提取 exe 内最大图标（可达 256px）平滑缩放，最清晰；
+/// 清晰度关键：显示尺寸 ~46-83 DIP（选中放大），高 DPI 屏下物理像素更高。
+/// 统一以 256×256 产出（下采样锐利，上采样发糊）：
+///  1. 窗口自身图标 WM_GETICON / 窗口类图标 GCLP_HICON —— 但先经 GetIconInfo 查
+///     原生尺寸：大量应用的 ICON_BIG 只有 32×32，上采样到 256 必糊，此类窗口
+///     跳过 HICON，直接走 exe 文件图标（Shell 提取 exe 内最大 256px 源平滑缩放）；
+///  2. exe 文件图标 → IShellItemImageFactory.GetImage(256, RESIZETOSTRETCH)；
+///  3. 小尺寸 HICON 兜底光栅化（聊胜于无）；
 ///  4. SHGetFileInfo / ExtractIconEx 最后兜底。
-/// 图标来源：优先应用运行时设置的窗口图标，失败才用文件图标。
+///
+/// 黑边修复（v0.5）：两条路径产出的都是**预乘 alpha** 像素，而 HBITMAP→WPF
+/// 互操作（CreateBitmapSourceFromHBitmap）无法声明 Pbgra32，半透明边缘被按
+/// 直通 alpha 二次衰减 → 薄黑边。现在统一直读像素字节、显式按 Pbgra32 构造。
 /// </summary>
 public static class IconService
 {
     private const uint IconLoadTimeoutMs = 200;
-    // 2× 渲染：显示约 46-83 DIP（选中放大），高 DPI 屏下物理像素更高；
-    // 64px 源会被上采样发虚，128px 源走 Fant 下采样后锐利
-    private const int IconRasterSize = 128;
+    // 显示约 46-83 DIP（选中放大），150%/200% DPI 下物理像素可达 ~166px；
+    // 统一 256px 产出：大源走 Fant 下采样锐利，小源上采样必糊（故下方有原生尺寸门槛）
+    private const int IconRasterSize = 256;
+    // 窗口 HICON 原生尺寸低于该值时放弃它，优先 exe 文件图标（32px 上采样到 256 是主要糊源）
+    private const int MinWindowIconSize = 128;
 
     public static ImageSource? GetWindowIcon(IntPtr hwnd, uint processId)
     {
         try
         {
-            // 1) 窗口自身设置的大图标（应用运行时图标，与系统 Alt+Tab 一致）
+            // 1) 窗口/窗口类 HICON（应用运行时图标，与系统 Alt+Tab 一致）——
+            //    仅当原生尺寸足够大才用：32px 图标放大到 256 是模糊主因
             IntPtr hIcon = QueryIcon(hwnd, NativeMethods.ICON_BIG);
             if (hIcon == IntPtr.Zero)
                 hIcon = QueryIcon(hwnd, NativeMethods.ICON_SMALL2);
-            if (hIcon != IntPtr.Zero)
+            if (hIcon == IntPtr.Zero)
+                hIcon = NativeMethods.GetClassIcon(hwnd);
+            if (hIcon != IntPtr.Zero && GetIconNativeSize(hIcon) >= MinWindowIconSize)
                 return RasterizeIcon(hIcon, IconRasterSize);
 
-            // 2) 窗口类注册表里的默认图标
-            hIcon = NativeMethods.GetClassIcon(hwnd);
-            if (hIcon != IntPtr.Zero)
-                return RasterizeIcon(hIcon, IconRasterSize);
-
-            // 3) exe 文件图标：Shell 高清渲染（256px 源平滑缩放到 128）
+            // 2) exe 文件图标：Shell 高清渲染（256px 源）
             string? exePath = GetProcessPath(processId);
             if (exePath != null)
             {
                 var shellIcon = GetShellFileIcon(exePath, IconRasterSize);
                 if (shellIcon != null)
                     return shellIcon;
-
-                // 4) 经典兜底
-                return FallbackFileIcon(exePath);
             }
+
+            // 3) 小尺寸窗口 HICON 兜底（比没有强）
+            if (hIcon != IntPtr.Zero)
+                return RasterizeIcon(hIcon, IconRasterSize);
+
+            // 4) 经典兜底
+            if (exePath != null)
+                return FallbackFileIcon(exePath);
         }
         catch
         {
             // 图标提取绝不能打断切换器
         }
         return null;
+    }
+
+    /// <summary>HICON 原生边长（GetIconInfo 取位图尺寸；查询失败返回 0）。</summary>
+    private static int GetIconNativeSize(IntPtr hIcon)
+    {
+        if (!NativeMethods.GetIconInfo(hIcon, out var info))
+            return 0;
+        try
+        {
+            IntPtr hb = info.hbmColor != IntPtr.Zero ? info.hbmColor : info.hbmMask;
+            if (hb != IntPtr.Zero
+                && NativeMethods.GetObjectW(hb, Marshal.SizeOf<NativeMethods.BITMAP>(), out var bm) != 0)
+                return Math.Min(bm.bmWidth, bm.bmHeight);
+            return 0;
+        }
+        finally
+        {
+            // GetIconInfo 返回的位图归调用方所有，必须销毁
+            if (info.hbmColor != IntPtr.Zero) NativeMethods.DeleteObject(info.hbmColor);
+            if (info.hbmMask != IntPtr.Zero) NativeMethods.DeleteObject(info.hbmMask);
+        }
     }
 
     // 固定项文件图标缓存：BuildItems 每次刷新都会为未运行的固定项提图标，
@@ -171,22 +199,25 @@ public static class IconService
     // ---- 高清光栅化 ----
 
     /// <summary>
-    /// DrawIconEx 高质量光栅化 HICON 到指定位图（双三次插值）。
-    /// 不销毁传入的 HICON（WM_GETICON/GCLP_HICON 均为借用句柄）。
+    /// HICON 光栅化到指定位图（v0.5 重写）。
+    /// DrawIconEx 画 32bpp 图标走 AND/XOR 位操作而非真 alpha 混合，半透明边缘
+    /// 产生脏色（薄黑边来源之一）；Icon.ToBitmap() 的 alpha 处理才是正确的，
+    /// 再由 GDI+ 双三次缩放到目标尺寸。不销毁传入的 HICON（借用句柄）。
     /// </summary>
     private static ImageSource? RasterizeIcon(IntPtr hIcon, int size)
     {
         try
         {
+            using var icon = System.Drawing.Icon.FromHandle(hIcon);   // 包装不持有句柄，Dispose 安全
+            using var srcBitmap = icon.ToBitmap();                     // 32bppArgb，alpha 正确
             using var bitmap = new Bitmap(size, size, PixelFormat.Format32bppPArgb);
             using (var graphics = Graphics.FromImage(bitmap))
             {
                 graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
                 graphics.SmoothingMode = SmoothingMode.HighQuality;
                 graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                IntPtr hdc = graphics.GetHdc();
-                NativeMethods.DrawIconEx(hdc, 0, 0, hIcon, size, size, 0, IntPtr.Zero, NativeMethods.DI_NORMAL);
-                graphics.ReleaseHdc();
+                graphics.CompositingMode = CompositingMode.SourceCopy;
+                graphics.DrawImage(srcBitmap, new Rectangle(0, 0, size, size));
             }
             return BitmapToSource(bitmap);
         }
@@ -214,10 +245,7 @@ public static class IconService
                 return null;
             try
             {
-                var source = Imaging.CreateBitmapSourceFromHBitmap(
-                    hBitmap, IntPtr.Zero, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
-                source.Freeze();
-                return source;
+                return HBitmapToSource(hBitmap);
             }
             finally
             {
@@ -235,19 +263,99 @@ public static class IconService
         }
     }
 
+    /// <summary>
+    /// GDI+ 位图 → WPF。像素是 Format32bppPArgb（预乘 alpha），
+    /// 必须显式按 Pbgra32 构造——走 GetHbitmap + CreateBitmapSourceFromHBitmap
+    /// 会丢 alpha 语义，半透明边缘被二次衰减成黑边。
+    /// </summary>
     private static ImageSource BitmapToSource(Bitmap bitmap)
     {
-        IntPtr hBitmap = bitmap.GetHbitmap();
+        var data = bitmap.LockBits(
+            new Rectangle(0, 0, bitmap.Width, bitmap.Height),
+            System.Drawing.Imaging.ImageLockMode.ReadOnly,
+            PixelFormat.Format32bppPArgb);
         try
         {
-            var source = Imaging.CreateBitmapSourceFromHBitmap(
-                hBitmap, IntPtr.Zero, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
+            int len = data.Stride * bitmap.Height;
+            var pixels = new byte[len];
+            Marshal.Copy(data.Scan0, pixels, 0, len);
+            NormalizeToPremultiplied(pixels);
+            var source = BitmapSource.Create(
+                bitmap.Width, bitmap.Height, 96, 96,
+                PixelFormats.Pbgra32, null,
+                pixels, data.Stride);
             source.Freeze();
             return source;
         }
         finally
         {
-            NativeMethods.DeleteObject(hBitmap);
+            bitmap.UnlockBits(data);
+        }
+    }
+
+    /// <summary>
+    /// Shell HBITMAP → WPF。IShellItemImageFactory 产出预乘 alpha 的 32bpp 位图，
+    /// GetDIBits 直读像素显式按 Pbgra32 构造（同上，绕开互操作的黑边）。
+    /// </summary>
+    private static ImageSource? HBitmapToSource(IntPtr hBitmap)
+    {
+        if (NativeMethods.GetObjectW(hBitmap, Marshal.SizeOf<NativeMethods.BITMAP>(), out var bm) == 0
+            || bm.bmWidth <= 0 || bm.bmHeight <= 0)
+            return null;
+        int w = bm.bmWidth, h = bm.bmHeight;
+        var pixels = new byte[w * h * 4];
+        var bmi = new NativeMethods.BITMAPINFOHEADER
+        {
+            biSize = (uint)Marshal.SizeOf<NativeMethods.BITMAPINFOHEADER>(),
+            biWidth = w,
+            biHeight = -h,          // 自顶向下
+            biPlanes = 1,
+            biBitCount = 32,
+            biCompression = 0,      // BI_RGB
+        };
+        IntPtr dc = NativeMethods.GetDC(IntPtr.Zero);
+        try
+        {
+            if (NativeMethods.GetDIBits(dc, hBitmap, 0, (uint)h, pixels, ref bmi, 0) == 0)
+                return null;
+        }
+        finally
+        {
+            NativeMethods.ReleaseDC(IntPtr.Zero, dc);
+        }
+        NormalizeToPremultiplied(pixels);
+        var source = BitmapSource.Create(w, h, 96, 96, PixelFormats.Pbgra32, null, pixels, w * 4);
+        source.Freeze();
+        return source;
+    }
+
+    /// <summary>
+    /// 直通 alpha → 预乘归一化（BGRA 原地）。
+    /// 判据：预乘像素恒有 R,G,B ≤ A；任一像素违反即说明整张图是直通 alpha，
+    /// 此时把所有像素手动预乘——否则 WPF 按 Pbgra32 显示时边缘被二次衰减出黑边。
+    /// </summary>
+    private static void NormalizeToPremultiplied(byte[] pixels)
+    {
+        bool straight = false;
+        for (int i = 0; i + 3 < pixels.Length; i += 4)
+        {
+            byte a = pixels[i + 3];
+            if (pixels[i] > a || pixels[i + 1] > a || pixels[i + 2] > a)
+            {
+                straight = true;
+                break;
+            }
+        }
+        if (!straight)
+            return;
+        for (int i = 0; i + 3 < pixels.Length; i += 4)
+        {
+            int a = pixels[i + 3];
+            if (a >= 255)
+                continue;
+            pixels[i] = (byte)(pixels[i] * a / 255);
+            pixels[i + 1] = (byte)(pixels[i + 1] * a / 255);
+            pixels[i + 2] = (byte)(pixels[i + 2] * a / 255);
         }
     }
 }

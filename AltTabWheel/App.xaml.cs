@@ -88,10 +88,17 @@ public partial class App : Application
             return;
         }
 
+        // --selftest-select=<进程名片段>：selftest 开轮盘后 t+4s 选中指定扇区
+        // （截图/演示用；合成按键被反作弊拦截，导航只能程序化）。
+        string? selectArg = e.Args.FirstOrDefault(a =>
+            a.StartsWith("--selftest-select=", StringComparison.OrdinalIgnoreCase));
+        string? selectName = selectArg?.Substring("--selftest-select=".Length);
+
         // --selftest: skip the hook and open the wheel directly after 2s (full pipeline check,
         // including the preview carousel — OpenWheel enumerates synchronously on first call).
         if (e.Args.Contains("--selftest", StringComparer.OrdinalIgnoreCase)
-            || e.Args.Contains("--selftest-reorder", StringComparer.OrdinalIgnoreCase))
+            || e.Args.Contains("--selftest-reorder", StringComparer.OrdinalIgnoreCase)
+            || selectName != null)
         {
             var timer = new System.Windows.Threading.DispatcherTimer
             {
@@ -104,6 +111,27 @@ public partial class App : Application
                 OpenWheel();
             };
             timer.Start();
+        }
+
+        if (selectName != null)
+        {
+            var sel = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(4) };
+            sel.Tick += (_, _) =>
+            {
+                sel.Stop();
+                for (int i = 0; i < _items.Count; i++)
+                {
+                    var name = _items[i].Primary?.ProcessName ?? _items[i].ProcessName;
+                    if (name?.Contains(selectName, StringComparison.OrdinalIgnoreCase) == true)
+                    {
+                        _wheel.Select(i);
+                        Log.Write($"selftest-select: -> {name} (index {i})");
+                        return;
+                    }
+                }
+                Log.Write($"selftest-select: '{selectName}' NOT FOUND in {_items.Count} items");
+            };
+            sel.Start();
         }
 
         // --selftest-reorder: selftest 基础上验证"选中窗口与轮盘对应"——
