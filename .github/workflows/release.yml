@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Publish (framework-dependent)
+        run: dotnet publish AltTabWheel/AltTabWheel.csproj -c Release -r win-x64 --self-contained false -o out/fx
+
+      - name: Publish (self-contained)
+        run: dotnet publish AltTabWheel/AltTabWheel.csproj -c Release -r win-x64 --self-contained true -o out/sc
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          Compress-Archive -Path out/fx/AltTabWheel.exe,out/fx/AltTabWheel.dll,out/fx/AltTabWheel.deps.json,out/fx/AltTabWheel.runtimeconfig.json -DestinationPath "AltTabWheel-$tag-win-x64-fx.zip" -Force
+          Remove-Item out/sc/*.pdb -ErrorAction SilentlyContinue
+          Compress-Archive -Path out/sc/* -DestinationPath "AltTabWheel-$tag-win-x64-standalone.zip" -Force
+          Get-ChildItem *.zip | Select-Object Name, Length
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          files: |
+            AltTabWheel-*-fx.zip
+            AltTabWheel-*-standalone.zip
+          body: |
+            ## AltTabWheel ${{ github.ref_name }}
+
+            按住 Alt 呼出轮盘，左侧实时预览轮播（DWM 逐帧合成），松开 Alt 切换。
+
+            ### 下载哪个
+            - **fx.zip**：框架依赖版，体积小；需先安装 [.NET 8 桌面运行时](https://dotnet.microsoft.com/download/dotnet/8.0)
+            - **standalone.zip**：免安装版，解压即用；体积较大
+
+            用法见仓库 README。
